@@ -26,13 +26,20 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class Station:
-    """A live radio station."""
+    """A live radio station.
+
+    ``stream`` holds the first available stream URL (backwards compatible).
+    ``streams`` holds all available formats keyed by format name
+    (e.g. ``{"shoutcast_stream": "http://…", "hls_stream": "http://…"}``)
+    so callers can select a preferred format.
+    """
 
     id: int
     title: str
     description: str = ""
     image: str = ""
     stream: str = ""
+    streams: Dict[str, str] = field(default_factory=dict)
 
     def to_external_ids(self) -> Dict[str, str]:
         """External IDs dict compatible with ``ExternalIds.from_dict()``.
@@ -47,14 +54,75 @@ class Station:
         return out
 
     def to_signals(self) -> Dict[str, Any]:
-        """Signals dict compatible with ``Signals(**station.to_signals())``.
+        """Signals dict compatible with ``Signals(**station.to_signals())``."""
+        return {"title": self.title, "medium": "radio"}
 
-        Stations map to ``medium="radio"`` in the mediavocab taxonomy.
-        """
-        return {
-            "title": self.title,
-            "medium": "radio",
-        }
+
+# ---------------------------------------------------------------------------
+# NowPlaying
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NowPlaying:
+    """What is currently on air for a live station.
+
+    Returned by :meth:`~pyheartradio.IHeartRadio.get_now_playing`.
+    All fields except ``station_id`` may be empty when the station
+    does not broadcast now-playing metadata.
+    """
+
+    station_id: int
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    image: str = ""
+    duration: Optional[int] = None  # seconds
+
+    def to_signals(self) -> Dict[str, Any]:
+        sig: Dict[str, Any] = {"medium": "music"}
+        if self.title:
+            sig["title"] = self.title
+        if self.artist:
+            sig["artist"] = self.artist
+        if self.album:
+            sig["album"] = self.album
+        if self.duration is not None:
+            sig["duration"] = self.duration
+        return sig
+
+    def to_external_ids(self) -> Dict[str, str]:
+        return {"iheart_station_id": str(self.station_id)}
+
+
+# ---------------------------------------------------------------------------
+# Album
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Album:
+    """A music album."""
+
+    id: int
+    title: str
+    artist: str = ""
+    artist_id: Optional[int] = None
+    year: Optional[int] = None
+    image: str = ""
+    track_count: Optional[int] = None
+
+    def to_external_ids(self) -> Dict[str, str]:
+        out: Dict[str, str] = {"iheart_album_id": str(self.id)}
+        if self.artist_id is not None:
+            out["iheart_artist_id"] = str(self.artist_id)
+        return out
+
+    def to_signals(self) -> Dict[str, Any]:
+        sig: Dict[str, Any] = {"title": self.title, "medium": "music"}
+        if self.artist:
+            sig["artist"] = self.artist
+        if self.year:
+            sig["year"] = self.year
+        return sig
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +142,7 @@ class Podcast:
         return {"iheart_podcast_id": str(self.id)}
 
     def to_signals(self) -> Dict[str, Any]:
-        return {
-            "title": self.title,
-            "medium": "podcast",
-        }
+        return {"title": self.title, "medium": "podcast"}
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +170,7 @@ class PodcastEpisode:
         return out
 
     def to_signals(self) -> Dict[str, Any]:
-        sig: Dict[str, Any] = {
-            "title": self.title,
-            "medium": "podcast",
-        }
+        sig: Dict[str, Any] = {"title": self.title, "medium": "podcast"}
         if self.duration is not None:
             sig["duration"] = self.duration
         return sig
@@ -124,8 +186,8 @@ class Track:
 
     .. note::
         iHeartRadio does not expose stream URLs for individual tracks.
-        Use :meth:`search_stations` or :meth:`search_artist` to obtain
-        playable content.
+        Use :meth:`search_stations` or :meth:`search_artist` for playable
+        content.
     """
 
     id: int
@@ -143,10 +205,7 @@ class Track:
         return out
 
     def to_signals(self) -> Dict[str, Any]:
-        sig: Dict[str, Any] = {
-            "title": self.title,
-            "medium": "music",
-        }
+        sig: Dict[str, Any] = {"title": self.title, "medium": "music"}
         if self.artist:
             sig["artist"] = self.artist
         if self.album:
@@ -173,10 +232,7 @@ class Artist:
         return {"iheart_artist_id": str(self.id)}
 
     def to_signals(self) -> Dict[str, Any]:
-        return {
-            "title": self.title,
-            "medium": "music",
-        }
+        return {"title": self.title, "medium": "music"}
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +253,24 @@ class Playlist:
         return {"iheart_playlist_id": str(self.id)}
 
     def to_signals(self) -> Dict[str, Any]:
-        return {
-            "title": self.title,
-            "medium": "music",
-        }
+        return {"title": self.title, "medium": "music"}
+
+
+# ---------------------------------------------------------------------------
+# SearchResults — unified multi-type search
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SearchResults:
+    """Results from a single unified search call across all entity types."""
+
+    query: str
+    stations: List[Station] = field(default_factory=list)
+    podcasts: List[Podcast] = field(default_factory=list)
+    artists: List[Artist] = field(default_factory=list)
+    tracks: List[Track] = field(default_factory=list)
+    playlists: List[Playlist] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return any([self.stations, self.podcasts, self.artists,
+                    self.tracks, self.playlists])

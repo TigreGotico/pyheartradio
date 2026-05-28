@@ -2,7 +2,10 @@ from threading import Lock
 from unittest.mock import MagicMock, patch
 import pytest
 from pyheartradio import IHeartRadio
-from pyheartradio.models import Artist, Playlist, Podcast, PodcastEpisode, Station, Track
+from pyheartradio.models import (
+    Album, Artist, NowPlaying, Playlist, Podcast, PodcastEpisode,
+    SearchResults, Station, Track,
+)
 
 
 @pytest.fixture
@@ -259,3 +262,136 @@ def test_custom_timeout_and_workers():
     c = IHeartRadio(timeout=3, max_workers=2)
     assert c.timeout == 3
     assert c.max_workers == 2
+
+
+# ---------------------------------------------------------------------------
+# Station streams dict
+# ---------------------------------------------------------------------------
+
+def test_station_exposes_all_stream_formats(client):
+    search_data = {"results": {"stations": [{"id": 1, "name": "Multi FM"}]}}
+    station_data = {
+        "hits": [{"streams": {"mp3": "http://mp3.example.com",
+                               "hls": "http://hls.example.com"},
+                  "logo": "", "description": ""}]
+    }
+    with patch.object(client.session, "get",
+                      side_effect=[_mock_get(search_data), _mock_get(station_data)]):
+        results = list(client.search_stations("multi"))
+
+    assert len(results) == 1
+    assert results[0].stream == "http://mp3.example.com"   # first format
+    assert results[0].streams == {"mp3": "http://mp3.example.com",
+                                   "hls": "http://hls.example.com"}
+
+
+# ---------------------------------------------------------------------------
+# get_now_playing
+# ---------------------------------------------------------------------------
+
+def test_get_now_playing(client):
+    data = {"currentTrack": {"title": "Heroes", "artistName": "David Bowie",
+                              "albumName": "Heroes", "duration": 360}}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        np = client.get_now_playing(7)
+
+    assert isinstance(np, NowPlaying)
+    assert np.station_id == 7
+    assert np.title == "Heroes"
+    assert np.artist == "David Bowie"
+    assert np.duration == 360
+
+
+def test_get_now_playing_empty_when_no_track(client):
+    with patch.object(client.session, "get", return_value=_mock_get({})):
+        np = client.get_now_playing(7)
+    assert np.station_id == 7
+    assert np.title == ""
+
+
+# ---------------------------------------------------------------------------
+# get_track
+# ---------------------------------------------------------------------------
+
+def test_get_track(client):
+    data = {"track": {"id": 99, "title": "Heroes", "artistName": "David Bowie",
+                       "albumName": "Heroes", "artistId": 5, "albumId": 10}}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        track = client.get_track(99)
+
+    assert isinstance(track, Track)
+    assert track.id == 99
+    assert track.title == "Heroes"
+    assert track.artist_id == 5
+
+
+# ---------------------------------------------------------------------------
+# get_artist_albums
+# ---------------------------------------------------------------------------
+
+def test_get_artist_albums(client):
+    data = {"albums": [{"id": 1, "title": "Ziggy", "artistName": "Bowie", "year": 1972},
+                        {"id": 2, "title": "Heroes", "artistName": "Bowie", "year": 1977}]}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        albums = list(client.get_artist_albums(100))
+
+    assert len(albums) == 2
+    assert isinstance(albums[0], Album)
+    assert albums[0].title == "Ziggy"
+    assert albums[0].year == 1972
+
+
+# ---------------------------------------------------------------------------
+# get_similar_artists
+# ---------------------------------------------------------------------------
+
+def test_get_similar_artists(client):
+    data = {"artists": [{"id": 5, "name": "Roxy Music", "image": "http://img.example.com"}]}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        similar = list(client.get_similar_artists(100))
+
+    assert len(similar) == 1
+    assert isinstance(similar[0], Artist)
+    assert similar[0].title == "Roxy Music"
+
+
+# ---------------------------------------------------------------------------
+# search (unified)
+# ---------------------------------------------------------------------------
+
+def test_search_unified(client):
+    search_response = {
+        "results": {
+            "stations": [{"id": 1, "name": "Jazz FM"}],
+            "podcasts": [{"id": 2, "title": "Jazz Podcast", "description": "", "image": ""}],
+            "artists":  [{"id": 3, "name": "Miles Davis", "image": ""}],
+            "tracks":   [{"id": 4, "title": "Kind of Blue",
+                          "artistName": "Miles", "albumName": "KoB",
+                          "image": "", "artistId": 3, "albumId": 10}],
+            "playlists": [{"id": 5, "name": "Jazz Chill",
+                           "description": "", "urls": {}}],
+        }
+    }
+    station_detail = {
+        "hits": [{"streams": {"mp3": "http://stream.example.com"}, "logo": "", "description": ""}]
+    }
+    with patch.object(client.session, "get",
+                      side_effect=[_mock_get(search_response), _mock_get(station_detail)]):
+        results = client.search("jazz")
+
+    assert isinstance(results, SearchResults)
+    assert results.query == "jazz"
+    assert len(results.stations) == 1
+    assert len(results.podcasts) == 1
+    assert len(results.artists) == 1
+    assert len(results.tracks) == 1
+    assert len(results.playlists) == 1
+    assert bool(results) is True
+
+
+def test_search_unified_empty(client):
+    empty = {"results": {"stations": [], "podcasts": [], "artists": [],
+                         "tracks": [], "playlists": []}}
+    with patch.object(client.session, "get", return_value=_mock_get(empty)):
+        results = client.search("zzz")
+    assert not results
