@@ -63,6 +63,7 @@ for stream in ids.streams:
 
 See [docs/metadatarr.md](docs/metadatarr.md) for the full integration guide.
 
+
 ## Caching
 
 The client uses a plain `requests.Session`. Station stream URLs are extremely stable (years-long TTL). To add caching, attach an adapter before searching:

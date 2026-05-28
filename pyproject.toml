@@ -15,7 +15,7 @@ dependencies = ["requests"]
 test = ["pytest", "pytest-timeout", "pytest-cov", "vcrpy", "pytest-vcr"]
 
 [project.urls]
-Homepage = "https://github.com/JarbasAl/pyheartradio"
+Homepage = "https://github.com/TigreGotico/pyheartradio"
 
 [tool.setuptools.dynamic]
 version = { attr = "pyheartradio.version.__version__" }
