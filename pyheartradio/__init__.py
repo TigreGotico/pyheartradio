@@ -1,3 +1,4 @@
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterator, List, Optional
 import requests
@@ -9,6 +10,19 @@ from pyheartradio.models import (
 
 _DEFAULT_MAX_RESULTS = 10
 _DEFAULT_MAX_WORKERS = 6
+
+# Preferred stream format order — first match wins. Callers that need a
+# specific format should inspect Station.streams directly.
+_STREAM_FORMAT_PREFERENCE = (
+    "shoutcast_stream",
+    "secure_shoutcast_stream",
+    "stw_stream",
+    "mp3",
+    "aac",
+    "hls_stream",
+)
+
+LOG = logging.getLogger(__name__)
 
 
 class IHeartRadio:
@@ -72,7 +86,7 @@ class IHeartRadio:
 
     def _parallel(self, fn, items: list) -> List[tuple]:
         """Run ``fn(item)`` for each item in parallel; return (item, result) pairs
-        in the original order, skipping items where fn raised an exception."""
+        in the original order. Items whose fetch raised are logged and skipped."""
         if not items:
             return []
         results: dict = {}
@@ -80,15 +94,29 @@ class IHeartRadio:
             futures = {pool.submit(fn, item): i for i, item in enumerate(items)}
             for fut in as_completed(futures):
                 idx = futures[fut]
-                try:
+                exc = fut.exception()
+                if exc is not None:
+                    LOG.debug("parallel fetch failed for item %d: %s", idx, exc)
+                else:
                     results[idx] = (items[idx], fut.result())
-                except Exception:
-                    pass
         return [results[i] for i in sorted(results)]
 
     @staticmethod
+    def _pick_stream(streams: dict) -> str:
+        """Return the preferred stream URL from a streams dict.
+
+        Tries formats in :data:`_STREAM_FORMAT_PREFERENCE` order, then
+        falls back to the first available entry. Returns ``""`` when the
+        dict is empty.
+        """
+        for fmt in _STREAM_FORMAT_PREFERENCE:
+            if fmt in streams:
+                return streams[fmt]
+        return next(iter(streams.values()), "")
+
+    @staticmethod
     def _station_from_raw(raw: dict, hit: dict) -> Optional[Station]:
-        streams = hit.get("streams", {})
+        streams = hit.get("streams") or {}
         if not streams:
             return None
         return Station(
@@ -96,14 +124,25 @@ class IHeartRadio:
             title=raw.get("name", ""),
             description=hit.get("description", ""),
             image=hit.get("logo", ""),
-            stream=next(iter(streams.values())),
+            stream=IHeartRadio._pick_stream(streams),
             streams=dict(streams),
         )
 
     @staticmethod
+    def _hit_from_detail(res: dict) -> dict:
+        """Safely extract the first hit dict from a station detail response.
+
+        Returns ``{}`` when hits is absent *or* when the list is empty, so
+        callers never receive an IndexError on a well-formed-but-empty response.
+        """
+        hits = res.get("hits") or []
+        return hits[0] if hits else {}
+
+    @staticmethod
     def _album_from_raw(raw: dict) -> Album:
+        album_id: Optional[int] = raw.get("id") or raw.get("albumId") or None
         return Album(
-            id=raw.get("id") or raw.get("albumId") or 0,
+            id=album_id,
             title=raw.get("title") or raw.get("albumName") or "",
             artist=raw.get("artistName") or raw.get("artist") or "",
             artist_id=raw.get("artistId"),
@@ -140,7 +179,7 @@ class IHeartRadio:
             return self._get(self.station_stream_url.format(stream_id=raw["id"]))
 
         for raw, res in self._parallel(fetch, raws):
-            hit = res.get("hits", [{}])[0]
+            hit = self._hit_from_detail(res)
             station = self._station_from_raw(raw, hit)
             if station:
                 yield station
@@ -197,7 +236,7 @@ class IHeartRadio:
 
     def search_artist(self, search_term: str,
                       max_results: int = _DEFAULT_MAX_RESULTS) -> Iterator[Artist]:
-        """Search for artists, with profile data fetched in parallel.
+        """Search for artists, with full profile data fetched in parallel.
 
         Parameters
         ----------
@@ -250,9 +289,13 @@ class IHeartRadio:
                max_results: int = _DEFAULT_MAX_RESULTS) -> SearchResults:
         """Unified search across all entity types in a single API call.
 
-        Returns a :class:`~pyheartradio.models.SearchResults` with all
-        entity types populated. Station stream URLs are fetched in parallel
-        after the initial search.
+        Returns a :class:`~pyheartradio.models.SearchResults` with all entity
+        types populated. Station stream URLs are fetched in parallel.
+
+        .. note::
+            Artist results from this method are stubs (id, title, image only).
+            Use :meth:`search_artist` to receive fully-populated Artist objects
+            with albums, tracks, and related artists.
 
         Parameters
         ----------
@@ -266,20 +309,13 @@ class IHeartRadio:
         >>> results = client.search("jazz")
         >>> print(len(results.stations), "stations,", len(results.podcasts), "podcasts")
         """
-        payload = {
-            "keywords": query,
-            "maxRows": max_results,
-            "bundle": "false",
-            "station": "true",
-            "artist": "true",
-            "track": "true",
-            "playlist": "true",
-            "podcast": "true",
-        }
-        data = self._get(self.search_url, payload)
+        data = self._get(self.search_url,
+                         self._search_payload(query, max_results,
+                                              station="true", artist="true",
+                                              track="true", playlist="true",
+                                              podcast="true"))
         res = data.get("results", {})
 
-        # fetch station stream URLs in parallel
         station_raws = res.get("stations", [])
 
         def fetch_station(raw: dict) -> dict:
@@ -287,7 +323,7 @@ class IHeartRadio:
 
         stations: List[Station] = []
         for raw, hit_res in self._parallel(fetch_station, station_raws):
-            hit = hit_res.get("hits", [{}])[0]
+            hit = self._hit_from_detail(hit_res)
             station = self._station_from_raw(raw, hit)
             if station:
                 stations.append(station)
@@ -339,7 +375,14 @@ class IHeartRadio:
         >>> print(np.artist, "—", np.title)
         """
         data = self._get(self.now_playing_url.format(stream_id=station_id))
-        track = data.get("currentTrack") or data.get("track") or {}
+        # Use explicit key lookup — do not use or-chaining on dicts because
+        # an empty dict {} is falsy and would incorrectly fall through to the
+        # next key when the station is between tracks.
+        track = data.get("currentTrack")
+        if not isinstance(track, dict):
+            track = data.get("track")
+        if not isinstance(track, dict):
+            track = {}
         return NowPlaying(
             station_id=station_id,
             title=track.get("title") or track.get("trackTitle") or "",
@@ -386,7 +429,11 @@ class IHeartRadio:
             The numeric iHeartRadio track ID.
         """
         data = self._get(self.track_url.format(track_id=track_id))
-        raw = data.get("track") or data
+        # Use explicit None check — do not use or-chaining because a present
+        # but null/empty 'track' key should not fall back to the envelope dict.
+        raw = data.get("track")
+        if not isinstance(raw, dict):
+            raw = data
         return Track(
             id=raw.get("id") or track_id,
             title=raw.get("title") or raw.get("trackTitle") or "",

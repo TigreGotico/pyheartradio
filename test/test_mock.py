@@ -271,8 +271,8 @@ def test_custom_timeout_and_workers():
 def test_station_exposes_all_stream_formats(client):
     search_data = {"results": {"stations": [{"id": 1, "name": "Multi FM"}]}}
     station_data = {
-        "hits": [{"streams": {"mp3": "http://mp3.example.com",
-                               "hls": "http://hls.example.com"},
+        "hits": [{"streams": {"shoutcast_stream": "http://shout.example.com",
+                               "hls_stream": "http://hls.example.com"},
                   "logo": "", "description": ""}]
     }
     with patch.object(client.session, "get",
@@ -280,9 +280,35 @@ def test_station_exposes_all_stream_formats(client):
         results = list(client.search_stations("multi"))
 
     assert len(results) == 1
-    assert results[0].stream == "http://mp3.example.com"   # first format
-    assert results[0].streams == {"mp3": "http://mp3.example.com",
-                                   "hls": "http://hls.example.com"}
+    # shoutcast_stream is first in _STREAM_FORMAT_PREFERENCE
+    assert results[0].stream == "http://shout.example.com"
+    assert "hls_stream" in results[0].streams
+    assert "shoutcast_stream" in results[0].streams
+
+
+def test_station_stream_preference_order(client):
+    """shoutcast_stream is preferred over hls_stream regardless of dict order."""
+    from pyheartradio import IHeartRadio
+    streams = {"hls_stream": "http://hls.example.com",
+               "shoutcast_stream": "http://shout.example.com"}
+    assert IHeartRadio._pick_stream(streams) == "http://shout.example.com"
+
+
+def test_station_empty_hits_list_yields_nothing(client):
+    """hits: [] (key present, list empty) must not crash with IndexError."""
+    search_data = {"results": {"stations": [{"id": 1, "name": "Ghost FM"}]}}
+    empty_hits = {"hits": []}
+    with patch.object(client.session, "get",
+                      side_effect=[_mock_get(search_data), _mock_get(empty_hits)]):
+        results = list(client.search_stations("ghost"))
+    assert results == []
+
+
+def test_hit_from_detail_absent_key():
+    from pyheartradio import IHeartRadio
+    assert IHeartRadio._hit_from_detail({}) == {}
+    assert IHeartRadio._hit_from_detail({"hits": []}) == {}
+    assert IHeartRadio._hit_from_detail({"hits": [{"id": 1}]}) == {"id": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +335,26 @@ def test_get_now_playing_empty_when_no_track(client):
     assert np.title == ""
 
 
+def test_get_now_playing_empty_currentTrack_dict_not_skipped(client):
+    """currentTrack: {} (between tracks) must not fall through to 'track' key."""
+    data = {"currentTrack": {}, "track": {"title": "Ad jingle", "artistName": "Ad"}}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        np = client.get_now_playing(7)
+    # currentTrack={} is the correct payload; 'track' is a different key and
+    # must not be read.
+    assert np.title == ""
+    assert np.artist == ""
+
+
+def test_get_now_playing_null_currentTrack_falls_to_track(client):
+    """currentTrack: null should fall through to 'track' key."""
+    data = {"currentTrack": None, "track": {"title": "Song", "artistName": "Artist"}}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        np = client.get_now_playing(7)
+    assert np.title == "Song"
+    assert np.artist == "Artist"
+
+
 # ---------------------------------------------------------------------------
 # get_track
 # ---------------------------------------------------------------------------
@@ -323,6 +369,26 @@ def test_get_track(client):
     assert track.id == 99
     assert track.title == "Heroes"
     assert track.artist_id == 5
+
+
+def test_get_track_null_track_key_does_not_corrupt(client):
+    """track: null must not fall back to the envelope dict and silently pass."""
+    data = {"track": None, "status": "not_found", "id": 0}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        track = client.get_track(99)
+    # Falls back to the envelope dict; id=0 is falsy so track_id sentinel is used
+    # and title comes from envelope keys (absent → "")
+    assert track.id == 99  # sentinel from track_id arg
+    assert track.title == ""  # envelope has no title
+
+
+def test_get_track_no_track_key_uses_envelope(client):
+    """When 'track' key is absent entirely, the response is the track directly."""
+    data = {"id": 55, "title": "Direct", "artistName": "Artist"}
+    with patch.object(client.session, "get", return_value=_mock_get(data)):
+        track = client.get_track(55)
+    assert track.id == 55
+    assert track.title == "Direct"
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,13 @@ def test_album_external_ids():
     assert ids["iheart_artist_id"] == "100"
 
 
+def test_album_none_id_omitted_from_external_ids():
+    """Album with no API id must not emit iheart_album_id='0' or 'None'."""
+    a = Album(id=None, title="Unknown")
+    ids = a.to_external_ids()
+    assert "iheart_album_id" not in ids
+
+
 def test_album_signals():
     a = Album(id=10, title="Ziggy", artist="David Bowie", year=1972)
     sig = a.to_signals()

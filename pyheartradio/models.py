@@ -100,9 +100,13 @@ class NowPlaying:
 
 @dataclass
 class Album:
-    """A music album."""
+    """A music album.
 
-    id: int
+    ``id`` is ``None`` when the API did not return an identifier for this
+    album entry (e.g. partial data from an artist profile).
+    """
+
+    id: Optional[int]
     title: str
     artist: str = ""
     artist_id: Optional[int] = None
@@ -111,7 +115,9 @@ class Album:
     track_count: Optional[int] = None
 
     def to_external_ids(self) -> Dict[str, str]:
-        out: Dict[str, str] = {"iheart_album_id": str(self.id)}
+        out: Dict[str, str] = {}
+        if self.id is not None:
+            out["iheart_album_id"] = str(self.id)
         if self.artist_id is not None:
             out["iheart_artist_id"] = str(self.artist_id)
         return out
