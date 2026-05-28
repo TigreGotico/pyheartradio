@@ -12,7 +12,7 @@ requires-python = ">=3.8"
 dependencies = ["requests"]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-timeout", "pytest-cov"]
+test = ["pytest", "pytest-timeout", "pytest-cov", "vcrpy", "pytest-vcr"]
 
 [project.urls]
 Homepage = "https://github.com/JarbasAl/pyheartradio"
@@ -22,3 +22,13 @@ version = { attr = "pyheartradio.version.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["pyheartradio*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]

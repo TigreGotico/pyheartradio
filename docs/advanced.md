@@ -1,14 +1,48 @@
 # Advanced usage
 
+## Parallel fetching and latency
+
+`search_stations`, `search_artist`, and `get_podcast_episodes` each make
+one search call plus one detail call per result.  Detail calls run in
+parallel using a `ThreadPoolExecutor` so latency is roughly one network
+round-trip rather than N:
+
+```
+search_stations("rock", max_results=10)
+  1 × search call          ~150 ms
+  10 × stream-URL lookups  ~150 ms  ← all concurrent
+  ─────────────────────────────────
+  total                    ~300 ms  (vs ~1.65 s serial)
+```
+
+Control concurrency with `max_workers` (default: 6):
+
+```python
+client = IHeartRadio(max_workers=10)   # more aggressive parallelism
+client = IHeartRadio(max_workers=1)    # sequential — useful for debugging
+```
+
+Failed detail fetches are silently skipped; the iterator continues with
+the remaining results.  Adjust `timeout` if your network has higher
+latency.
+
+## Limit result count
+
+All search methods accept `max_results` (default: 10):
+
+```python
+station = next(client.search_stations("WNYC", max_results=1))
+```
+
+Lowering `max_results` reduces both the number of search results and the
+number of parallel detail fetches, so it's the primary lever for
+single-result lookups.
+
 ## Custom timeout
 
 ```python
-client = IHeartRadio(timeout=5)    # 5-second global timeout
+client = IHeartRadio(timeout=5)    # 5-second per-request timeout
 ```
-
-The timeout applies to every individual HTTP call.  Some methods make two
-calls per result (stations, artists) so they can take up to `2 × timeout`
-seconds per item in the worst case.
 
 ## Retry logic
 
@@ -43,14 +77,39 @@ without a recognisable `User-Agent`:
 client.session.headers.update({"User-Agent": "MyApp/1.0"})
 ```
 
-## Limiting results
+## Caching
 
-All methods use `maxRows=10` by default.  The client does not expose this
-parameter today, but you can cap iteration yourself:
+Station stream URLs are extremely stable — they rarely change over months
+or years.  You do not need `requests-cache` as a hard dependency; attach
+any cache adapter to the session instead.
+
+**With `requests-cache` (global):**
 
 ```python
-import itertools
-top3 = list(itertools.islice(client.search_stations("jazz"), 3))
+import requests_cache
+requests_cache.install_cache("iheart", expire_after=3600)
+client = IHeartRadio()
+```
+
+**With `CacheControl` (session-scoped, no global side-effect):**
+
+```python
+from cachecontrol import CacheControl
+client = IHeartRadio()
+client.session = CacheControl(client.session)
+```
+
+**With a manual in-memory dict (zero deps, stations only):**
+
+```python
+_stream_cache: dict = {}
+
+def cached_stream(station_id: int) -> str:
+    if station_id not in _stream_cache:
+        station = next(client.search_stations(str(station_id), max_results=1), None)
+        if station:
+            _stream_cache[station_id] = station.stream
+    return _stream_cache.get(station_id, "")
 ```
 
 ## Iterating vs materialising
