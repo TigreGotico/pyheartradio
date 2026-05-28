@@ -1,8 +1,27 @@
 from typing import Iterator, Optional
 import requests
 
+from pyheartradio.models import Artist, Playlist, Podcast, PodcastEpisode, Station, Track
+
 
 class IHeartRadio:
+    """Client for the iHeartRadio public API.
+
+    All search methods return iterators of typed dataclass instances.
+    The client reuses a single :class:`requests.Session` across calls.
+
+    Parameters
+    ----------
+    timeout:
+        HTTP request timeout in seconds (default: 10).
+
+    Example
+    -------
+    >>> client = IHeartRadio()
+    >>> for station in client.search_stations("classic rock"):
+    ...     print(station.title, station.stream)
+    """
+
     search_url = "https://us.api.iheart.com/api/v3/search/all"
     podcast_episodes_url = "https://us.api.iheart.com/api/v3/podcast/podcasts/{podcast_id}/episodes"
     podcast_stream_url = "https://us.api.iheart.com/api/v3/podcast/episodes/{episode_id}"
@@ -12,6 +31,10 @@ class IHeartRadio:
     def __init__(self, timeout: int = 10) -> None:
         self.timeout = timeout
         self.session = requests.Session()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _get(self, url: str, params: Optional[dict] = None) -> dict:
         resp = self.session.get(url, params=params, timeout=self.timeout)
@@ -32,83 +55,162 @@ class IHeartRadio:
         base.update(flags)
         return base
 
-    def search_stations(self, search_term: str) -> Iterator[dict]:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def search_stations(self, search_term: str) -> Iterator[Station]:
+        """Search for live radio stations.
+
+        Yields one :class:`~pyheartradio.models.Station` per result that
+        has at least one playable stream URL.
+
+        Parameters
+        ----------
+        search_term:
+            Free-text query, e.g. ``"classic rock"`` or ``"WNYC"``.
+
+        Example
+        -------
+        >>> for station in client.search_stations("jazz"):
+        ...     print(station.title, "→", station.stream)
+        """
         data = self._get(self.search_url, self._search_payload(search_term, station="true"))
-        for station in data.get("results", {}).get("stations", []):
-            station_id = station["id"]
+        for raw in data.get("results", {}).get("stations", []):
+            station_id = raw["id"]
             res = self._get(self.station_stream_url.format(stream_id=station_id))
             hit = res.get("hits", [{}])[0]
             streams = hit.get("streams", {})
             stream_url = next(iter(streams.values()), None)
             if stream_url:
-                yield {
-                    "title": station["name"],
-                    "description": hit.get("description", ""),
-                    "stream": stream_url,
-                    "image": hit.get("logo", ""),
-                    "id": station_id,
-                }
+                yield Station(
+                    id=station_id,
+                    title=raw.get("name", ""),
+                    description=hit.get("description", ""),
+                    image=hit.get("logo", ""),
+                    stream=stream_url,
+                )
 
-    def search_podcast(self, search_term: str) -> Iterator[dict]:
+    def search_podcast(self, search_term: str) -> Iterator[Podcast]:
+        """Search for podcast shows.
+
+        Yields one :class:`~pyheartradio.models.Podcast` per result.
+        To retrieve individual episodes, pass the podcast
+        :attr:`~pyheartradio.models.Podcast.id` to
+        :meth:`get_podcast_episodes`.
+
+        Parameters
+        ----------
+        search_term:
+            Free-text query, e.g. ``"true crime"`` or ``"Radiolab"``.
+        """
         data = self._get(self.search_url, self._search_payload(search_term, podcast="true"))
-        for podcast in data.get("results", {}).get("podcasts", []):
-            yield {
-                "title": podcast.get("title", ""),
-                "image": podcast.get("image", ""),
-                "description": podcast.get("description", ""),
-                "id": podcast["id"],
-            }
+        for raw in data.get("results", {}).get("podcasts", []):
+            yield Podcast(
+                id=raw["id"],
+                title=raw.get("title", ""),
+                description=raw.get("description", ""),
+                image=raw.get("image", ""),
+            )
 
-    def get_podcast_episodes(self, podcast_id: int) -> Iterator[dict]:
+    def get_podcast_episodes(self, podcast_id: int) -> Iterator[PodcastEpisode]:
+        """Retrieve episodes for a specific podcast.
+
+        Each yielded :class:`~pyheartradio.models.PodcastEpisode` includes a
+        direct audio stream URL.
+
+        Parameters
+        ----------
+        podcast_id:
+            The numeric iHeartRadio podcast ID — use the
+            :attr:`~pyheartradio.models.Podcast.id` from a
+            :meth:`search_podcast` result.
+
+        Example
+        -------
+        >>> podcast = next(client.search_podcast("Serial"))
+        >>> for ep in client.get_podcast_episodes(podcast.id):
+        ...     print(ep.title, ep.stream)
+        """
         res = self._get(self.podcast_episodes_url.format(podcast_id=podcast_id))
-        for episode in res.get("data", []):
-            episode_id = episode["id"]
+        for raw in res.get("data", []):
+            episode_id = raw["id"]
             stream_res = self._get(self.podcast_stream_url.format(episode_id=episode_id))
-            yield {
-                "title": episode.get("title", ""),
-                "duration": episode.get("duration"),
-                "image": episode.get("imageUrl", ""),
-                "id": episode_id,
-                "description": episode.get("description", ""),
-                "stream": stream_res.get("episode", {}).get("mediaUrl", ""),
-            }
+            yield PodcastEpisode(
+                id=episode_id,
+                podcast_id=podcast_id,
+                title=raw.get("title", ""),
+                description=raw.get("description", ""),
+                image=raw.get("imageUrl", ""),
+                duration=raw.get("duration"),
+                stream=stream_res.get("episode", {}).get("mediaUrl", ""),
+            )
 
-    def search_track(self, search_term: str) -> Iterator[dict]:
-        """Search for tracks. Stream URLs are not available via this API."""
+    def search_track(self, search_term: str) -> Iterator[Track]:
+        """Search for music tracks.
+
+        .. note::
+            iHeartRadio does not expose stream URLs for individual tracks
+            via the public API.  Use :meth:`search_stations` or
+            :meth:`search_artist` for playable content.
+
+        Parameters
+        ----------
+        search_term:
+            Free-text query, e.g. ``"Bohemian Rhapsody"``.
+        """
         data = self._get(self.search_url, self._search_payload(search_term, track="true"))
-        for track in data.get("results", {}).get("tracks", []):
-            yield {
-                "title": track.get("title", ""),
-                "album": track.get("albumName", ""),
-                "artist": track.get("artistName", ""),
-                "image": track.get("image", ""),
-                "id": track["id"],
-                "artist_id": track.get("artistId"),
-                "album_id": track.get("albumId"),
-            }
+        for raw in data.get("results", {}).get("tracks", []):
+            yield Track(
+                id=raw["id"],
+                title=raw.get("title", ""),
+                artist=raw.get("artistName", ""),
+                album=raw.get("albumName", ""),
+                image=raw.get("image", ""),
+                artist_id=raw.get("artistId"),
+                album_id=raw.get("albumId"),
+            )
 
-    def search_artist(self, search_term: str) -> Iterator[dict]:
+    def search_artist(self, search_term: str) -> Iterator[Artist]:
+        """Search for artists.
+
+        Yields one :class:`~pyheartradio.models.Artist` per result, with
+        albums, top tracks, and related artists populated from the artist
+        profile endpoint.
+
+        Parameters
+        ----------
+        search_term:
+            Free-text query, e.g. ``"David Bowie"``.
+        """
         data = self._get(self.search_url, self._search_payload(search_term, artist="true"))
-        for artist in data.get("results", {}).get("artists", []):
-            artist_id = artist["id"]
+        for raw in data.get("results", {}).get("artists", []):
+            artist_id = raw["id"]
             profile = self._get(self.artist_profile_url.format(artist_id=artist_id))
-            yield {
-                "title": artist["name"],
-                "albums": profile.get("albums", []),
-                "tracks": profile.get("tracks", []),
-                "related_artist": profile.get("relatedTo", []),
-                "image": artist.get("image", ""),
-                "id": artist_id,
-            }
+            yield Artist(
+                id=artist_id,
+                title=raw.get("name", ""),
+                image=raw.get("image", ""),
+                albums=profile.get("albums", []),
+                tracks=profile.get("tracks", []),
+                related_artists=profile.get("relatedTo", []),
+            )
 
-    def search_playlist(self, search_term: str) -> Iterator[dict]:
+    def search_playlist(self, search_term: str) -> Iterator[Playlist]:
+        """Search for curated playlists.
+
+        Parameters
+        ----------
+        search_term:
+            Free-text query, e.g. ``"workout"`` or ``"90s hits"``.
+        """
         data = self._get(self.search_url, self._search_payload(search_term, playlist="true"))
-        for playlist in data.get("results", {}).get("playlists", []):
-            urls = playlist.get("urls", {})
-            yield {
-                "title": playlist.get("name", ""),
-                "url": urls.get("web", ""),
-                "description": playlist.get("description", ""),
-                "image": urls.get("image", ""),
-                "id": playlist["id"],
-            }
+        for raw in data.get("results", {}).get("playlists", []):
+            urls = raw.get("urls", {})
+            yield Playlist(
+                id=raw["id"],
+                title=raw.get("name", ""),
+                description=raw.get("description", ""),
+                image=urls.get("image", ""),
+                url=urls.get("web", ""),
+            )

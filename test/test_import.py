@@ -1,5 +1,6 @@
 def test_import():
     from pyheartradio import IHeartRadio
+    from pyheartradio.models import Artist, Playlist, Podcast, PodcastEpisode, Station, Track
 
 
 def test_version():
