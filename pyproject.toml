@@ -13,6 +13,7 @@ dependencies = ["requests"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-timeout", "pytest-cov", "vcrpy", "pytest-vcr"]
+antibot = ["unblock_requests"]
 
 [project.urls]
 Homepage = "https://github.com/TigreGotico/pyheartradio"
