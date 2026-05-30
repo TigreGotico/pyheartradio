@@ -59,7 +59,14 @@ class IHeartRadio:
     def __init__(self, timeout: int = 10, max_workers: int = _DEFAULT_MAX_WORKERS) -> None:
         self.timeout = timeout
         self.max_workers = max_workers
-        self.session = requests.Session()
+        try:
+            from unblock_requests import CloudflareSession
+
+            self.session = CloudflareSession(
+                env_prefix="PYHEARTRADIO", wayback_fallback=True
+            )
+        except Exception:
+            self.session = requests.Session()
 
     # ------------------------------------------------------------------
     # Internal helpers
