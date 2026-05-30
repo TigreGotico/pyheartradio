@@ -12,6 +12,7 @@ requires-python = ">=3.8"
 dependencies = ["requests"]
 
 [project.optional-dependencies]
+anon = ["anon_requests"]
 test = ["pytest", "pytest-timeout", "pytest-cov", "vcrpy", "pytest-vcr"]
 antibot = ["unblock_requests"]
 
